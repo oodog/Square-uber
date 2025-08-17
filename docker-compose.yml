@@ -1,3 +1,4 @@
+rm -f docker-compose.yml
 cat > docker-compose.yml <<'EOF'
 services:
   db:
@@ -18,16 +19,17 @@ services:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     env_file: .env
     ports:
       - "${APP_PORT:-3000}:8080"
     command: >
-      bash -lc "
-        npx prisma migrate deploy || true &&
-        node server/dist/index.js
-      "
+      bash -lc "npx prisma migrate deploy || true && node server/dist/index.js"
 
 volumes:
   dbdata: {}
 EOF
+
+# Quick validation (will print the resolved compose config or error out)
+docker compose config
