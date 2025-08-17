@@ -1,30 +1,26 @@
 cat > Dockerfile <<'EOF'
-# 1) Build frontend
+# 1) Frontend
 FROM node:20-alpine AS web
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci || npm install
 COPY web/ .
-RUN npm run build || echo "No web build step found; continuing"
+RUN npm run build || echo "No web build step; continuing"
 
-# 2) Build backend
+# 2) Backend
 FROM node:20-alpine AS server
 WORKDIR /app/server
 COPY server/package*.json ./
 RUN npm ci || npm install
 COPY server/ .
-# If TypeScript, build to dist (ignore if not configured)
 RUN npm run build || echo "No server build step; continuing"
 
 # 3) Runtime
 FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-# copy server code
 COPY --from=server /app/server /app/server
-# copy frontend build (if present)
 COPY --from=web /app/web/dist /app/web/dist
-# install only prod deps for server
 RUN npm -C /app/server ci --omit=dev || npm -C /app/server install --omit=dev
 EXPOSE 8080
 CMD ["node", "server/dist/index.js"]
