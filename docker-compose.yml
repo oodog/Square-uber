@@ -1,10 +1,12 @@
+cat > docker-compose.yml <<'EOF'
 services:
   db:
     image: postgres:16
     environment:
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-secret}
       POSTGRES_DB: menu_sync
-    volumes: [dbdata:/var/lib/postgresql/data]
+    volumes:
+      - dbdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -12,15 +14,20 @@ services:
       retries: 10
 
   app:
-    build: .
-    ports:
-      - "${APP_PORT:-3000}:8080"
-    env_file: .env
+    build:
+      context: .
+      dockerfile: Dockerfile
     depends_on:
       - db
+    env_file: .env
+    ports:
+      - "${APP_PORT:-3000}:8080"
     command: >
-      bash -lc "npx prisma migrate deploy &&
-                node server/dist/index.js"
+      bash -lc "
+        npx prisma migrate deploy || true &&
+        node server/dist/index.js
+      "
 
 volumes:
   dbdata: {}
+EOF
