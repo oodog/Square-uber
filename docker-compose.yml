@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-secret}
+      POSTGRES_DB: menu_sync
+    volumes: [dbdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    ports:
+      - "${APP_PORT:-3000}:8080"
+    env_file: .env
+    depends_on:
+      - db
+    command: >
+      bash -lc "npx prisma migrate deploy &&
+                node server/dist/index.js"
+
+volumes:
+  dbdata: {}
