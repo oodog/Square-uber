@@ -47,8 +47,9 @@ db → PostgreSQL (local via Docker, Azure in prod)
 Clone and install in **one command**:
 
 ```bash
-curl -sS https://raw.githubusercontent.com/oodog/Square-uber/refs/heads/main/install.sh | bash
-
+bash <(curl -sS https://raw.githubusercontent.com/oodog/Square-uber/refs/heads/main/install.sh)
+###
+##
 
 You’ll see a menu:
 
