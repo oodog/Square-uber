@@ -1,3 +1,17 @@
+maybe_sudo() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+  else
+    sudo docker "$@"
+  fi
+}
+
+# replace docker compose calls like this:
+maybe_sudo compose -f "$ROOT/docker-compose.yml" up -d --build
+maybe_sudo compose -f "$ROOT/docker-compose.yml" exec -T app npx prisma migrate deploy
+maybe_sudo compose -f "$ROOT/docker-compose.yml" exec -T app node server/node_modules/.bin/ts-node server/prisma/seed.ts || true
+
+
 #!/usr/bin/env bash
 set -euo pipefail
 
