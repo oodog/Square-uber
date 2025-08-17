@@ -1,0 +1,28 @@
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+generator client { provider = "prisma-client-js" }
+
+model Settings {
+  id                Int     @id
+  squareLocationId  String?
+  squareAccessToken String?
+  uberStoreId       String?
+  uberClientId      String?
+  uberClientSecret  String?
+  globalMarkupPct   Int?    @default(0)
+}
+
+model Item {
+  squareItemId        String?
+  squareVariationId   String @id
+  name                String
+  description         String?
+  categoryId          String?
+  categoryName        String?
+  priceCents          Int
+  imageUrl            String?
+  modifierListIds     String? // JSON-encoded array
+  syncToUber          Boolean @default(false)
+  markupPct           Int?
+  uberItemId          String?
+  updatedAt           DateTime
+}
