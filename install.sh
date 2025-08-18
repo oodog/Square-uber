@@ -3,6 +3,9 @@ set -euo pipefail
 
 # ==============================================================================
 # End-to-end, self-healing installer for Square-uber
+# - Auto-installs Docker on Ubuntu/Debian (apt-based) if missing
+# - Works when piped from curl; keeps prompts via /dev/tty
+# - Repairs Dockerfile/compose, writes .env, runs with sudo fallback
 # ==============================================================================
 
 REPO_URL="https://github.com/oodog/Square-uber.git"
@@ -27,7 +30,7 @@ EOF
 MODE=""           # local | azure | ""
 ASSUME_YES="no"   # --yes
 
-# ----------------------------- Parse args (FIXED) -----------------------------
+# ----------------------------- Parse args -----------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local) MODE="local"; shift ;;
@@ -67,33 +70,68 @@ read_from_tty() {
   fi
 }
 
-# simple confirm (respects --yes)
-confirm() { [[ "$ASSUME_YES" == "yes" ]] && return 0; local a=""; read_from_tty "$1 [y/N]: " a; [[ "${a,,}" =~ ^y(es)?$ ]]; }
+# ----------------------------- Docker install (apt-based) -----------------------------
+is_apt()   { command -v apt-get >/dev/null 2>&1; }
+have_sudo(){ command -v sudo >/dev/null 2>&1; }
 
-# ----------------------------- System checks -----------------------------
-precheck_tools() {
-  for c in git curl awk sed printf; do
-    command -v "$c" >/dev/null || { err "Missing required tool: $c"; exit 1; }
-  done
-  if ! command -v docker >/dev/null 2>&1; then
-    err "Docker is not installed."
-    cat <<'EOF'
-Ubuntu 22.04 quick install:
-  sudo apt-get update
-  sudo apt-get install -y ca-certificates curl gnupg
-  sudo install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release; echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-  sudo apt-get update
-  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  sudo systemctl enable --now docker
-  sudo usermod -aG docker $USER
-  newgrp docker
-EOF
+auto_install_docker_apt() {
+  note "Installing Docker Engine + Compose plugin (apt)…"
+  if ! have_sudo; then
+    err "sudo not available; cannot auto-install Docker. Install Docker manually and re-run."
     exit 1
   fi
-  if ! docker compose version >/dev/null 2>&1; then
-    err "Docker Compose plugin missing (package: docker-compose-plugin)."
+
+  sudo apt-get update -y
+  sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+  sudo install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg || \
+  curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+  local codename
+  codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-stable}")"
+
+  echo \
+"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/$(. /etc/os-release; echo ${ID:-ubuntu}) \
+${codename} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+
+  sudo apt-get update -y
+  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  sudo systemctl enable --now docker || true
+
+  # add user to docker group for next login; current shell uses sudo fallback
+  if getent group docker >/dev/null 2>&1; then
+    sudo usermod -aG docker "$USER" || true
+  fi
+
+  note "Docker installed. Continuing…"
+}
+
+ensure_docker_present() {
+  if command -v docker >/dev/null 2>&1; then
+    return
+  fi
+  if is_apt; then
+    auto_install_docker_apt
+  else
+    err "Docker not found and auto-install unsupported on this distro. Please install Docker and rerun."
+    exit 1
+  fi
+}
+
+ensure_compose_present() {
+  if docker compose version >/dev/null 2>&1; then
+    return
+  fi
+  if is_apt; then
+    note "Installing Docker Compose plugin…"
+    have_sudo || { err "sudo required to install compose plugin"; exit 1; }
+    sudo apt-get update -y
+    sudo apt-get install -y docker-compose-plugin
+  else
+    err "Docker Compose plugin missing and auto-install unsupported on this distro."
     exit 1
   fi
 }
@@ -101,20 +139,16 @@ EOF
 ensure_docker_running() {
   if docker info >/dev/null 2>&1; then return; fi
   warn "Docker daemon not reachable. Trying: sudo systemctl enable --now docker"
-  if command -v sudo >/dev/null 2>&1; then
-    sudo systemctl enable --now docker || true
-    sleep 2
-    sudo docker info >/dev/null 2>&1 || { err "Docker still not reachable. Check: sudo systemctl status docker"; exit 1; }
-  else
-    err "Docker daemon not reachable and sudo unavailable."
-    exit 1
-  fi
+  have_sudo || { err "sudo unavailable to start Docker"; exit 1; }
+  sudo systemctl enable --now docker || true
+  sleep 2
+  sudo docker info >/dev/null 2>&1 || { err "Docker still not reachable. Check: sudo systemctl status docker"; exit 1; }
 }
 
-# docker compose with sudo fallback
+# docker compose with sudo fallback (so no relogin required)
 dc() {
   if docker info >/dev/null 2>&1; then docker compose "$@"; return; fi
-  if command -v sudo >/dev/null 2>&1; then sudo docker compose "$@"; return; fi
+  if have_sudo; then sudo docker compose "$@"; return; fi
   err "Docker daemon not accessible."; exit 1
 }
 
@@ -250,16 +284,25 @@ write_env_interactive() {
 
 # ----------------------------- Actions -----------------------------
 run_local() {
-  precheck_tools
+  # Tools & Docker (install if needed)
+  for c in git curl awk sed printf; do
+    command -v "$c" >/dev/null || { err "Missing required tool: $c"; exit 1; }
+  done
+  ensure_docker_present
+  ensure_compose_present
   ensure_docker_running
+
+  # Repo + files + env
   fetch_repo
   ensure_files
   write_env_interactive
 
+  # Bring up
   note ""
   note "Bringing up containers (this may pull images on first run)…"
   dc -f "$APP_DIR/docker-compose.yml" up -d --build
 
+  # DB migrations/seed (best-effort)
   note ""
   note "Applying database migrations (best-effort)…"
   dc -f "$APP_DIR/docker-compose.yml" exec -T app npx prisma migrate deploy || true
@@ -270,10 +313,16 @@ run_local() {
 }
 
 run_azure() {
-  precheck_tools
+  for c in git curl awk sed printf; do
+    command -v "$c" >/dev/null || { err "Missing required tool: $c"; exit 1; }
+  done
+  ensure_docker_present
+  ensure_compose_present
   ensure_docker_running
+
   fetch_repo
   ensure_files
+
   if [ -f "$APP_DIR/scripts/azure.sh" ]; then
     bash "$APP_DIR/scripts/azure.sh"
   else
