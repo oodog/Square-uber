@@ -3,10 +3,6 @@ set -euo pipefail
 
 # ==============================================================================
 # End-to-end, self-healing installer for Square-uber
-# - Works when piped from curl (keeps TTY for prompts)
-# - Checks & auto-fixes common issues (Docker, compose YAML, permissions)
-# - Clones/updates repo, scaffolds/repairs Dockerfile & compose
-# - Writes validated .env, brings stack up with sudo fallback
 # ==============================================================================
 
 REPO_URL="https://github.com/oodog/Square-uber.git"
@@ -31,7 +27,7 @@ EOF
 MODE=""           # local | azure | ""
 ASSUME_YES="no"   # --yes
 
-# ----------------------------- Parse args -----------------------------
+# ----------------------------- Parse args (FIXED) -----------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local) MODE="local"; shift ;;
@@ -40,7 +36,8 @@ while [[ $# -gt 0 ]]; do
     --yes) ASSUME_YES="yes"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) warn "Unknown arg: $1"; shift ;;
-  case_esac=true; done
+  esac
+done
 
 # ----------------------------- I/O helpers -----------------------------
 read_from_tty() {
@@ -57,7 +54,7 @@ read_from_tty() {
       read -rp "$prompt" "$__outvar"
     fi
   else
-    exec 3</dev/tty || { err "No TTY available; use flags like --local/--azure/--yes."; exit 1; }
+    exec 3</dev/tty || { err "No TTY available; use --local/--azure/--yes."; exit 1; }
     if [[ -n "$default" ]]; then
       # shellcheck disable=SC2162
       read -u 3 -rp "$prompt" "$__outvar"
@@ -70,23 +67,18 @@ read_from_tty() {
   fi
 }
 
-confirm() {
-  local q="$1"; local ans=""
-  if [[ "$ASSUME_YES" == "yes" ]]; then return 0; fi
-  read_from_tty "$q [y/N]: " ans
-  [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
-}
+# simple confirm (respects --yes)
+confirm() { [[ "$ASSUME_YES" == "yes" ]] && return 0; local a=""; read_from_tty "$1 [y/N]: " a; [[ "${a,,}" =~ ^y(es)?$ ]]; }
 
 # ----------------------------- System checks -----------------------------
 precheck_tools() {
   for c in git curl awk sed printf; do
     command -v "$c" >/dev/null || { err "Missing required tool: $c"; exit 1; }
   done
-
   if ! command -v docker >/dev/null 2>&1; then
     err "Docker is not installed."
-    echo "Ubuntu 22.04 quick install:"
     cat <<'EOF'
+Ubuntu 22.04 quick install:
   sudo apt-get update
   sudo apt-get install -y ca-certificates curl gnupg
   sudo install -m 0755 -d /etc/apt/keyrings
@@ -100,43 +92,30 @@ precheck_tools() {
 EOF
     exit 1
   fi
-
   if ! docker compose version >/dev/null 2>&1; then
-    err "Docker Compose plugin missing (package: docker-compose-plugin). Install it and rerun."
+    err "Docker Compose plugin missing (package: docker-compose-plugin)."
     exit 1
   fi
 }
 
 ensure_docker_running() {
-  if docker info >/dev/null 2>&1; then
-    return
-  fi
-  warn "Docker daemon not reachable. Attempting to start with sudo…"
+  if docker info >/dev/null 2>&1; then return; fi
+  warn "Docker daemon not reachable. Trying: sudo systemctl enable --now docker"
   if command -v sudo >/dev/null 2>&1; then
     sudo systemctl enable --now docker || true
     sleep 2
-    if ! sudo docker info >/dev/null 2>&1; then
-      err "Docker still not reachable. Check: sudo systemctl status docker"
-      exit 1
-    fi
+    sudo docker info >/dev/null 2>&1 || { err "Docker still not reachable. Check: sudo systemctl status docker"; exit 1; }
   else
     err "Docker daemon not reachable and sudo unavailable."
     exit 1
   fi
 }
 
-# Run docker compose with sudo fallback
+# docker compose with sudo fallback
 dc() {
-  if docker info >/dev/null 2>&1; then
-    docker compose "$@"
-    return
-  fi
-  if command -v sudo >/dev/null 2>&1; then
-    sudo docker compose "$@"
-    return
-  fi
-  err "Docker daemon not accessible."
-  exit 1
+  if docker info >/dev/null 2>&1; then docker compose "$@"; return; fi
+  if command -v sudo >/dev/null 2>&1; then sudo docker compose "$@"; return; fi
+  err "Docker daemon not accessible."; exit 1
 }
 
 # ----------------------------- Repo ops -----------------------------
@@ -217,31 +196,14 @@ EOF
 
 normalize_file() {
   local f="$1"
-  # Strip CRLF, convert tabs to two spaces
-  awk 'sub(/\r$/,"")1' "$f" > "$f.unix" && mv "$f.unix" "$f"
-  sed -i $'s/\t/  /g' "$f"
+  awk 'sub(/\r$/,"")1' "$f" > "$f.unix" && mv "$f.unix" "$f" || true     # strip CRLF
+  sed -i $'s/\t/  /g' "$f" || true                                       # tabs→spaces
 }
 
 ensure_files() {
   cd "$APP_DIR"
-
-  # Dockerfile
-  if [ ! -f Dockerfile ]; then
-    warn "Dockerfile missing; writing a default one."
-    write_default_dockerfile
-  else
-    normalize_file Dockerfile || true
-  fi
-
-  # docker-compose.yml
-  if [ ! -f docker-compose.yml ]; then
-    warn "docker-compose.yml missing; writing a default one."
-    write_default_compose
-  else
-    normalize_file docker-compose.yml || true
-  fi
-
-  # Validate docker-compose.yml; rewrite if broken
+  if [ ! -f Dockerfile ]; then warn "Dockerfile missing; writing a default one."; write_default_dockerfile; else normalize_file Dockerfile; fi
+  if [ ! -f docker-compose.yml ]; then warn "docker-compose.yml missing; writing a default one."; write_default_compose; else normalize_file docker-compose.yml; fi
   if ! docker compose config >/dev/null 2>&1; then
     warn "docker-compose.yml invalid; rewriting a clean default…"
     write_default_compose
@@ -266,11 +228,7 @@ write_env_interactive() {
   read_from_tty "Uber Client ID: " UBER_CLIENT_ID ""
   read_from_tty "Uber Client Secret: " UBER_CLIENT_SECRET ""
 
-  # Validate/normalize
-  if ! [[ "$APP_PORT" =~ ^[0-9]+$ ]]; then
-    warn "Invalid port '$APP_PORT'; using 3000."
-    APP_PORT="3000"
-  fi
+  if ! [[ "$APP_PORT" =~ ^[0-9]+$ ]]; then warn "Invalid port '$APP_PORT'; using 3000."; APP_PORT="3000"; fi
 
   {
     echo "APP_PORT=$APP_PORT"
@@ -304,7 +262,6 @@ run_local() {
 
   note ""
   note "Applying database migrations (best-effort)…"
-  # Ignore failures on first run (e.g., no migrations yet)
   dc -f "$APP_DIR/docker-compose.yml" exec -T app npx prisma migrate deploy || true
   dc -f "$APP_DIR/docker-compose.yml" exec -T app node server/node_modules/.bin/ts-node server/prisma/seed.ts || true
 
