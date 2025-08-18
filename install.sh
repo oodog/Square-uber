@@ -2,19 +2,32 @@
 set -euo pipefail
 
 # ==============================================================================
-# End-to-end, self-healing installer for Square-uber
-# - Auto-installs Docker on Ubuntu/Debian (apt-based) if missing
-# - Works when piped from curl; keeps prompts via /dev/tty
-# - Repairs Dockerfile/compose, writes .env, runs with sudo fallback
+# Self-healing installer (no home-folder assumptions)
 # ==============================================================================
 
 REPO_URL="https://github.com/oodog/Square-uber.git"
-APP_DIR="${APP_DIR:-$HOME/Square-uber}"
 
 bold(){ printf "\033[1m%s\033[0m\n" "$*"; }
 note(){ printf "\033[36m%s\033[0m\n" "$*"; }
 warn(){ printf "\033[33m%s\033[0m\n" "$*"; }
 err(){ printf "\033[31m%s\033[0m\n" "$*"; }
+
+# ----- choose a default APP_DIR that doesn't care about the user folder -----
+choose_default_dir() {
+  if [ -w /opt ] && [ -d /opt ]; then
+    echo "/opt/square-uber"
+    return
+  fi
+  if [ -w "$PWD" ]; then
+    echo "$PWD/Square-uber"
+    return
+  fi
+  echo "${HOME:-/tmp}/Square-uber"
+}
+
+APP_DIR="${APP_DIR:-$(choose_default_dir)}"
+MODE=""           # local | azure | ""
+ASSUME_YES="no"   # --yes
 
 usage() {
   cat <<EOF
@@ -23,12 +36,9 @@ Usage:
 
 Examples:
   bash <(curl -sS https://raw.githubusercontent.com/oodog/Square-uber/refs/heads/main/install.sh)
-  curl -sS https://raw.githubusercontent.com/oodog/Square-uber/refs/heads/main/install.sh | bash -s -- --local --yes
+  curl -sS https://raw.githubusercontent.com/oodog/Square-uber/refs/heads/main/install.sh | bash -s -- --local --dir /opt/square-uber --yes
 EOF
 }
-
-MODE=""           # local | azure | ""
-ASSUME_YES="no"   # --yes
 
 # ----------------------------- Parse args -----------------------------
 while [[ $# -gt 0 ]]; do
@@ -80,62 +90,41 @@ auto_install_docker_apt() {
     err "sudo not available; cannot auto-install Docker. Install Docker manually and re-run."
     exit 1
   fi
-
   sudo apt-get update -y
   sudo apt-get install -y ca-certificates curl gnupg lsb-release
-
-  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo install -m 0755 -d /etc/apt/keyrings || true
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg || \
   curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-  local codename
-  codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-stable}")"
-
+  local codename; codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-stable}")"
   echo \
 "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/$(. /etc/os-release; echo ${ID:-ubuntu}) \
 ${codename} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-
   sudo apt-get update -y
   sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
   sudo systemctl enable --now docker || true
-
-  # add user to docker group for next login; current shell uses sudo fallback
   if getent group docker >/dev/null 2>&1; then
     sudo usermod -aG docker "$USER" || true
   fi
-
   note "Docker installed. Continuing…"
 }
 
 ensure_docker_present() {
-  if command -v docker >/dev/null 2>&1; then
-    return
-  fi
-  if is_apt; then
-    auto_install_docker_apt
-  else
-    err "Docker not found and auto-install unsupported on this distro. Please install Docker and rerun."
-    exit 1
+  if command -v docker >/dev/null 2>&1; then return; fi
+  if is_apt; then auto_install_docker_apt; else
+    err "Docker not found and auto-install unsupported on this distro."; exit 1
   fi
 }
-
 ensure_compose_present() {
-  if docker compose version >/dev/null 2>&1; then
-    return
-  fi
+  if docker compose version >/dev/null 2>&1; then return; fi
   if is_apt; then
     note "Installing Docker Compose plugin…"
     have_sudo || { err "sudo required to install compose plugin"; exit 1; }
-    sudo apt-get update -y
-    sudo apt-get install -y docker-compose-plugin
+    sudo apt-get update -y && sudo apt-get install -y docker-compose-plugin
   else
-    err "Docker Compose plugin missing and auto-install unsupported on this distro."
-    exit 1
+    err "Compose plugin missing and auto-install unsupported on this distro."; exit 1
   fi
 }
-
 ensure_docker_running() {
   if docker info >/dev/null 2>&1; then return; fi
   warn "Docker daemon not reachable. Trying: sudo systemctl enable --now docker"
@@ -154,6 +143,8 @@ dc() {
 
 # ----------------------------- Repo ops -----------------------------
 fetch_repo() {
+  # make parent dir if needed
+  mkdir -p "$(dirname "$APP_DIR")"
   if [ ! -d "$APP_DIR/.git" ]; then
     note "Cloning $REPO_URL into $APP_DIR..."
     git clone --depth=1 "$REPO_URL" "$APP_DIR"
@@ -234,10 +225,33 @@ normalize_file() {
   sed -i $'s/\t/  /g' "$f" || true                                       # tabs→spaces
 }
 
+# create a minimal .env FIRST so compose validation won't fail
+ensure_env_minimal() {
+  cd "$APP_DIR"
+  if [ -f .env ]; then return; fi
+  note "Creating minimal .env so compose can validate…"
+  {
+    echo "APP_PORT=3000"
+    echo "NODE_ENV=production"
+    echo "DATABASE_URL=postgresql://postgres:secret@db:5432/menu_sync?schema=public"
+    echo
+    echo "# Square"
+    echo "SQUARE_LOCATION_ID="
+    echo "SQUARE_ACCESS_TOKEN="
+    echo
+    echo "# Uber"
+    echo "UBER_STORE_ID="
+    echo "UBER_CLIENT_ID="
+    echo "UBER_CLIENT_SECRET="
+  } > .env
+}
+
 ensure_files() {
   cd "$APP_DIR"
   if [ ! -f Dockerfile ]; then warn "Dockerfile missing; writing a default one."; write_default_dockerfile; else normalize_file Dockerfile; fi
   if [ ! -f docker-compose.yml ]; then warn "docker-compose.yml missing; writing a default one."; write_default_compose; else normalize_file docker-compose.yml; fi
+  ensure_env_minimal
+  # Now it is safe to validate compose (env_file exists)
   if ! docker compose config >/dev/null 2>&1; then
     warn "docker-compose.yml invalid; rewriting a clean default…"
     write_default_compose
@@ -245,7 +259,7 @@ ensure_files() {
   fi
 }
 
-# ----------------------------- .env writing -----------------------------
+# ----------------------------- .env writing (full) -----------------------------
 write_env_interactive() {
   cd "$APP_DIR"
   local env_file=".env"
@@ -294,8 +308,8 @@ run_local() {
 
   # Repo + files + env
   fetch_repo
-  ensure_files
-  write_env_interactive
+  ensure_files          # writes defaults + minimal .env + validates compose
+  write_env_interactive # overwrites .env with your inputs
 
   # Bring up
   note ""
@@ -319,10 +333,8 @@ run_azure() {
   ensure_docker_present
   ensure_compose_present
   ensure_docker_running
-
   fetch_repo
   ensure_files
-
   if [ -f "$APP_DIR/scripts/azure.sh" ]; then
     bash "$APP_DIR/scripts/azure.sh"
   else
