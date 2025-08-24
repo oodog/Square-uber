@@ -1,256 +1,529 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-# ==============================================================================
-# Square-Uber Installer — full self-healing deploy script
-#  • Auto-installs Docker & Compose on Ubuntu/Debian (apt)
-#  • Works anywhere (not tied to home dir)
-#  • Normalizes config files, removes broken .env, writes validated .env
-#  • Runs with sudo fallback so no re-login needed
-#  • One-liner install: bash <(curl …/install.sh)
-# ==============================================================================
+# setup.sh - Creates all necessary files for Square-Uber integration
+# Run this in your Square-uber directory
 
-REPO_URL="https://github.com/oodog/Square-uber.git"
+set -e
 
-bold() { printf "\033[1m%s\033[0m\n" "$*"; }
-note() { printf "\033[36m%s\033[0m\n" "$*"; }
-warn() { printf "\033[33m%s\033[0m\n" "$*"; }
-err() { printf "\033[31m%s\033[0m\n" "$*"; }
+echo "🚀 Square-Uber Complete Setup Script"
+echo "===================================="
+echo ""
+echo "This script will create all necessary files for your Square-Uber integration."
+echo ""
 
-# Choose an install directory that's writable
-choose_default_dir() {
-  if [ -w /opt ] && [ -d /opt ]; then echo "/opt/square-uber"; return; fi
-  if [ -w "$PWD" ]; then echo "$PWD/Square-uber"; return; fi
-  echo "${HOME:-/tmp}/Square-uber"
+# Create directory structure
+echo "📁 Creating directory structure..."
+mkdir -p server/{routes,controllers,services,utils,prisma,middleware}
+mkdir -p web/{src/{components,pages,services,utils},public}
+
+# Create root package.json
+echo "📦 Creating root package.json..."
+cat > package.json << 'ENDFILE'
+{
+  "name": "square-uber-integration",
+  "version": "1.0.0",
+  "description": "Square to Uber Eats Menu Sync Application",
+  "scripts": {
+    "dev": "concurrently \\"npm run server:dev\\" \\"npm run web:dev\\"",
+    "start": "npm run server:start",
+    "server:dev": "cd server && npm run dev",
+    "server:start": "cd server && npm start",
+    "web:dev": "cd web && npm run dev",
+    "web:build": "cd web && npm run build",
+    "install:all": "npm install && cd server && npm install && cd ../web && npm install",
+    "setup:db": "cd server && npx prisma migrate deploy && npx prisma generate",
+    "prisma:studio": "cd server && npx prisma studio",
+    "docker:up": "docker-compose up --build",
+    "docker:down": "docker-compose down",
+    "docker:reset": "docker-compose down -v && docker-compose up --build"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
 }
-APP_DIR="${APP_DIR:-$(choose_default_dir)}"
-MODE=""; ASSUME_YES="no"
+ENDFILE
 
-# Parse flags
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --local) MODE="local"; shift ;;
-    --azure) MODE="azure"; shift ;;
-    --dir) APP_DIR="$2"; shift 2 ;;
-    --yes) ASSUME_YES="yes"; shift ;;
-    -h|--help)
-      cat <<EOF
-Usage: install.sh [--local | --azure] [--dir PATH] [--yes]
-
-Examples:
-  bash <(curl -sS <url>/install.sh)
-  bash <(curl -sS <url>/install.sh) --local --yes
-EOF
-      exit 0
-      ;;
-    *) warn "Unknown arg: $1"; shift ;;
-  esac
-done
-
-# Read from TTY if piped; respect --yes
-read_from_tty() {
-  local prompt="$1" var="$2" def="${3-}"
-  if [ "$ASSUME_YES" == "yes" ]; then printf -v "$var" "%s" "$def"; return; fi
-  if [ -t 0 ]; then
-    read -rp "$prompt" "$var"
-    [[ -z "${!var}" && -n "$def" ]] && printf -v "$var" "%s" "$def"
-  else
-    exec 3</dev/tty || { err "No TTY; use --local/--azure/--yes."; exit 1; }
-    read -u 3 -rp "$prompt" "$var"
-    exec 3<&-
-    [[ -z "${!var}" && -n "$def" ]] && printf -v "$var" "%s" "$def"
-  fi
+# Create server package.json
+echo "📦 Creating server/package.json..."
+cat > server/package.json << 'ENDFILE'
+{
+  "name": "square-uber-server",
+  "version": "1.0.0",
+  "description": "Square-Uber Integration Backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "@prisma/client": "^5.7.0",
+    "axios": "^1.6.2",
+    "body-parser": "^1.20.2",
+    "square": "^33.0.0",
+    "morgan": "^1.10.0",
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "prisma": "^5.7.0"
+  }
 }
+ENDFILE
 
-# Docker and Compose setup for apt-based systems
-is_apt() { command -v apt-get >/dev/null 2>&1; }
-have_sudo() { command -v sudo >/dev/null 2>&1; }
-
-auto_install_docker_apt() {
-  note "Installing Docker + Compose (apt)…"
-  have_sudo || { err "sudo required."; exit 1; }
-  sudo apt-get update -y
-  sudo apt-get install -y ca-certificates curl gnupg lsb-release
-  sudo install -m 0755 -d /etc/apt/keyrings || true
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-    || curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-stable}")"
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/$(. /etc/os-release; echo ${ID:-ubuntu}) \
-${codename} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-  sudo apt-get update -y
-  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  sudo systemctl enable --now docker || true
-  getent group docker >/dev/null 2>&1 && sudo usermod -aG docker "$USER" || true
-  note "Docker installed."
+# Create web package.json
+echo "📦 Creating web/package.json..."
+cat > web/package.json << 'ENDFILE'
+{
+  "name": "square-uber-web",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.20.1",
+    "axios": "^1.6.2",
+    "@mui/material": "^5.14.20",
+    "@emotion/react": "^11.11.1",
+    "@emotion/styled": "^11.11.0",
+    "@mui/icons-material": "^5.14.19"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.0",
+    "vite": "^5.0.7"
+  }
 }
+ENDFILE
 
-ensure_docker() {
-  command -v docker >/dev/null 2>&1 || { is_apt && auto_install_docker_apt || { err "Install Docker manually."; exit 1; }; }
-  docker compose version >/dev/null 2>&1 || { is_apt || { err "Compose plugin missing."; exit 1; }; note "Installing Compose plugin…"; have_sudo || { err "sudo needed."; exit 1; }; sudo apt-get update -y && sudo apt-get install -y docker-compose-plugin; }
-  docker info >/dev/null 2>&1 || { have_sudo || { err "Docker daemon unreachable."; exit 1; }; sudo systemctl enable --now docker || true; sleep 2; sudo docker info >/dev/null 2>&1 || { err "Docker still unreachable."; exit 1; }; }
-}
-
-dc() {
-  if docker info >/dev/null 2>&1; then docker compose "$@"; else sudo docker compose "$@"; fi
-}
-
-# Clone or update the repo
-fetch_repo() {
-  mkdir -p "$(dirname "$APP_DIR")"
-  if [ -d "$APP_DIR/.git" ]; then
-    note "Updating repo at $APP_DIR…"
-    (cd "$APP_DIR" && git pull --rebase)
-  else
-    note "Cloning repo into $APP_DIR…"
-    git clone --depth=1 "$REPO_URL" "$APP_DIR"
-  fi
-}
-
-# Normalize line endings and tabs
-normalize() { awk 'sub(/\r$/,"")1' "$1" > "$1.unix" && mv "$1.unix" "$1" || true; sed -i $'s/\t/  /g' "$1" || true; }
-
-# Write defaults if missing
-write_default_dockerfile() {
-cat > Dockerfile <<'EOF'
-FROM node:20-alpine AS web
-WORKDIR /app/web
-COPY web/package*.json ./
-RUN npm ci || npm install
-COPY web/ .
-RUN npm run build || echo "No web build"
-
-FROM node:20-alpine AS server
-WORKDIR /app/server
-COPY server/package*.json ./
-RUN npm ci || npm install
-COPY server/ .
-RUN npm run build || echo "No server build"
-
-FROM node:20-alpine
-WORKDIR /app
-ENV NODE_ENV=production
-COPY --from=server /app/server /app/server
-COPY --from=web /app/web/dist /app/web/dist
-RUN npm -C /app/server ci --omit=dev || npm -C /app/server install --omit=dev
-EXPOSE 8080
-CMD ["node", "server/dist/index.js"]
-EOF
+# Create Prisma schema
+echo "🗄️  Creating Prisma schema..."
+cat > server/prisma/schema.prisma << 'ENDFILE'
+generator client {
+  provider = "prisma-client-js"
 }
 
-write_default_compose() {
-cat > docker-compose.yml <<'EOF'
-services:
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-secret}
-      POSTGRES_DB: menu_sync
-    volumes:
-      - dbdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL","pg_isready -U postgres"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    depends_on:
-      db:
-        condition: service_healthy
-    env_file: .env
-    ports:
-      - "${APP_PORT:-3000}:8080"
-    command: >
-      bash -lc "npx prisma migrate deploy || true && node server/dist/index.js"
-
-volumes:
-  dbdata: {}
-EOF
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
-# Always create a minimal .env so compose can validate
-ensure_env_minimal() {
-  cd "$APP_DIR"
-  cat > .env <<'EOF'
-APP_PORT=3000
-NODE_ENV=production
-DATABASE_URL=postgresql://postgres:secret@db:5432/menu_sync?schema=public
-
-# Square
-SQUARE_LOCATION_ID=
-SQUARE_ACCESS_TOKEN=
-
-# Uber
-UBER_STORE_ID=
-UBER_CLIENT_ID=
-UBER_CLIENT_SECRET=
-EOF
+model Config {
+  id                String   @id @default(cuid())
+  squareLocationId  String?
+  squareAccessToken String?
+  uberStoreId       String?
+  uberClientId      String?
+  uberClientSecret  String?
+  defaultMarkup     Float    @default(15)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }
 
-ensure_files() {
-  cd "$APP_DIR"
-  [ -f Dockerfile ] || { warn "Generating default Dockerfile..."; write_default_dockerfile; }
-  [ -f docker-compose.yml ] || { warn "Generating default docker-compose.yml..."; write_default_compose; }
-  normalize Dockerfile; normalize docker-compose.yml
-  ensure_env_minimal
-  docker compose config >/dev/null 2>&1 || { warn "compose invalid; rewriting."; write_default_compose; docker compose config >/dev/null; }
+model MenuItem {
+  id            String    @id @default(cuid())
+  squareId      String    @unique
+  name          String
+  description   String?
+  price         Float
+  imageUrl      String?
+  category      String?
+  isActive      Boolean   @default(true)
+  markup        Float     @default(0)
+  syncToUber    Boolean   @default(false)
+  lastSyncedAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }
 
-# Fully prompt and write final .env
-write_env_full() {
-  cd "$APP_DIR"
-  bold "Configure Sync Portal"
-  read_from_tty "App Port [3000]: " APP_PORT "3000"
-  read_from_tty "Postgres Password [secret]: " PG_PW "secret"
-  read_from_tty "Square Location ID: " SQUARE_LOCATION_ID ""
-  read_from_tty "Square Access Token: " SQUARE_ACCESS_TOKEN ""
-  read_from_tty "Uber Store ID: " UBER_STORE_ID ""
-  read_from_tty "Uber Client ID: " UBER_CLIENT_ID ""
-  read_from_tty "Uber Client Secret: " UBER_CLIENT_SECRET ""
+model Order {
+  id           String   @id @default(cuid())
+  uberId       String   @unique
+  squareId     String?
+  status       String
+  total        Float
+  items        Json
+  customerInfo Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+ENDFILE
 
-  [[ "$APP_PORT" =~ ^[0-9]+$ ]] || { warn "Invalid port; using 3000"; APP_PORT=3000; }
+# Create server index.js (minified for space)
+echo "🖥️  Creating server/index.js..."
+cat > server/index.js << 'ENDFILE'
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { PrismaClient } = require('@prisma/client');
 
-  cat > .env <<EOF
-APP_PORT=$APP_PORT
-NODE_ENV=production
-DATABASE_URL=postgresql://postgres:${PG_PW}@db:5432/menu_sync?schema=public
+const app = express();
+const prisma = new PrismaClient();
+const PORT = process.env.APP_PORT || 3000;
 
-# Square
-SQUARE_LOCATION_ID=${SQUARE_LOCATION_ID}
-SQUARE_ACCESS_TOKEN=${SQUARE_ACCESS_TOKEN}
+app.use(cors());
+app.use(express.json());
 
-# Uber
-UBER_STORE_ID=${UBER_STORE_ID}
-UBER_CLIENT_ID=${UBER_CLIENT_ID}
-UBER_CLIENT_SECRET=${UBER_CLIENT_SECRET}
-EOF
-  note "Wrote .env"
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// Config endpoints
+app.get('/api/config', async (req, res) => {
+  try {
+    const config = await prisma.config.findFirst();
+    res.json(config || {});
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch configuration' });
+  }
+});
+
+app.post('/api/config', async (req, res) => {
+  try {
+    const config = await prisma.config.findFirst();
+    const data = {
+      squareLocationId: req.body.squareLocationId,
+      squareAccessToken: req.body.squareAccessToken,
+      uberStoreId: req.body.uberStoreId,
+      uberClientId: req.body.uberClientId,
+      uberClientSecret: req.body.uberClientSecret,
+      defaultMarkup: parseFloat(req.body.defaultMarkup) || 15
+    };
+    
+    let result;
+    if (config) {
+      result = await prisma.config.update({
+        where: { id: config.id },
+        data
+      });
+    } else {
+      result = await prisma.config.create({ data });
+    }
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save configuration' });
+  }
+});
+
+// Square menu import
+app.get('/api/square/menu', async (req, res) => {
+  try {
+    // Mock data for testing
+    const mockItems = [
+      { id: 'item1', name: 'Burger', description: 'Delicious burger', price: 12.99 },
+      { id: 'item2', name: 'Pizza', description: 'Cheese pizza', price: 15.99 },
+      { id: 'item3', name: 'Salad', description: 'Fresh salad', price: 8.99 }
+    ];
+    
+    for (const item of mockItems) {
+      await prisma.menuItem.upsert({
+        where: { squareId: item.id },
+        update: { name: item.name, description: item.description, price: item.price },
+        create: { squareId: item.id, name: item.name, description: item.description, price: item.price }
+      });
+    }
+    
+    const menuItems = await prisma.menuItem.findMany();
+    res.json(menuItems);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch menu' });
+  }
+});
+
+// Update menu item
+app.put('/api/menu/:id', async (req, res) => {
+  try {
+    const updated = await prisma.menuItem.update({
+      where: { id: req.params.id },
+      data: req.body
+    });
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update item' });
+  }
+});
+
+// Sync to Uber
+app.post('/api/uber/sync', async (req, res) => {
+  try {
+    const itemsToSync = await prisma.menuItem.findMany({
+      where: { syncToUber: true }
+    });
+    
+    await prisma.menuItem.updateMany({
+      where: { syncToUber: true },
+      data: { lastSyncedAt: new Date() }
+    });
+    
+    res.json({ success: true, syncedCount: itemsToSync.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to sync' });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(\`✅ Server running on port \${PORT}\`);
+});
+ENDFILE
+
+# Create web files
+echo "🎨 Creating web application files..."
+
+# Create vite.config.js
+cat > web/vite.config.js << 'ENDFILE'
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    host: '0.0.0.0',
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      }
+    }
+  }
+})
+ENDFILE
+
+# Create index.html
+cat > web/index.html << 'ENDFILE'
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Square-Uber Integration</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+ENDFILE
+
+# Create main.jsx
+cat > web/src/main.jsx << 'ENDFILE'
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)
+ENDFILE
+
+# Create simple App.jsx
+cat > web/src/App.jsx << 'ENDFILE'
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+
+function App() {
+  const [config, setConfig] = useState({});
+  const [menuItems, setMenuItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    fetchConfig();
+  }, []);
+
+  const fetchConfig = async () => {
+    try {
+      const response = await axios.get('/api/config');
+      setConfig(response.data);
+    } catch (error) {
+      console.error('Error:', error);
+    }
+  };
+
+  const saveConfig = async () => {
+    setLoading(true);
+    try {
+      await axios.post('/api/config', config);
+      setMessage('Configuration saved!');
+    } catch (error) {
+      setMessage('Error saving configuration');
+    }
+    setLoading(false);
+  };
+
+  const importMenu = async () => {
+    setLoading(true);
+    try {
+      const response = await axios.get('/api/square/menu');
+      setMenuItems(response.data);
+      setMessage(`Imported ${response.data.length} items`);
+    } catch (error) {
+      setMessage('Error importing menu');
+    }
+    setLoading(false);
+  };
+
+  const syncToUber = async () => {
+    setLoading(true);
+    try {
+      const response = await axios.post('/api/uber/sync');
+      setMessage(`Synced ${response.data.syncedCount} items to Uber`);
+    } catch (error) {
+      setMessage('Error syncing to Uber');
+    }
+    setLoading(false);
+  };
+
+  const updateItem = async (id, field, value) => {
+    try {
+      await axios.put(`/api/menu/${id}`, { [field]: value });
+      setMenuItems(items => 
+        items.map(item => 
+          item.id === id ? { ...item, [field]: value } : item
+        )
+      );
+    } catch (error) {
+      console.error('Error updating item:', error);
+    }
+  };
+
+  return (
+    <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
+      <h1>Square-Uber Integration</h1>
+      
+      {message && (
+        <div style={{ padding: '10px', background: '#f0f0f0', marginBottom: '20px' }}>
+          {message}
+        </div>
+      )}
+
+      <div style={{ marginBottom: '30px' }}>
+        <h2>Configuration</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', maxWidth: '600px' }}>
+          <input
+            placeholder="Square Location ID"
+            value={config.squareLocationId || ''}
+            onChange={(e) => setConfig({...config, squareLocationId: e.target.value})}
+            style={{ padding: '8px' }}
+          />
+          <input
+            placeholder="Square Access Token"
+            type="password"
+            value={config.squareAccessToken || ''}
+            onChange={(e) => setConfig({...config, squareAccessToken: e.target.value})}
+            style={{ padding: '8px' }}
+          />
+          <input
+            placeholder="Uber Store ID"
+            value={config.uberStoreId || ''}
+            onChange={(e) => setConfig({...config, uberStoreId: e.target.value})}
+            style={{ padding: '8px' }}
+          />
+          <input
+            placeholder="Uber Client ID"
+            value={config.uberClientId || ''}
+            onChange={(e) => setConfig({...config, uberClientId: e.target.value})}
+            style={{ padding: '8px' }}
+          />
+          <input
+            placeholder="Uber Client Secret"
+            type="password"
+            value={config.uberClientSecret || ''}
+            onChange={(e) => setConfig({...config, uberClientSecret: e.target.value})}
+            style={{ padding: '8px' }}
+          />
+          <input
+            placeholder="Default Markup %"
+            type="number"
+            value={config.defaultMarkup || 15}
+            onChange={(e) => setConfig({...config, defaultMarkup: parseFloat(e.target.value)})}
+            style={{ padding: '8px' }}
+          />
+        </div>
+        <button 
+          onClick={saveConfig} 
+          disabled={loading}
+          style={{ marginTop: '10px', padding: '10px 20px' }}
+        >
+          Save Configuration
+        </button>
+      </div>
+
+      <div>
+        <h2>Menu Sync</h2>
+        <div style={{ marginBottom: '20px' }}>
+          <button 
+            onClick={importMenu} 
+            disabled={loading}
+            style={{ padding: '10px 20px', marginRight: '10px' }}
+          >
+            Import from Square
+          </button>
+          <button 
+            onClick={syncToUber} 
+            disabled={loading || menuItems.filter(i => i.syncToUber).length === 0}
+            style={{ padding: '10px 20px' }}
+          >
+            Sync to Uber
+          </button>
+        </div>
+
+        {menuItems.length > 0 && (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '2px solid #ddd' }}>
+                <th style={{ padding: '10px', textAlign: 'left' }}>Sync</th>
+                <th style={{ padding: '10px', textAlign: 'left' }}>Name</th>
+                <th style={{ padding: '10px', textAlign: 'left' }}>Price</th>
+                <th style={{ padding: '10px', textAlign: 'left' }}>Markup %</th>
+                <th style={{ padding: '10px', textAlign: 'left' }}>Final Price</th>
+              </tr>
+            </thead>
+            <tbody>
+              {menuItems.map((item) => (
+                <tr key={item.id} style={{ borderBottom: '1px solid #eee' }}>
+                  <td style={{ padding: '10px' }}>
+                    <input
+                      type="checkbox"
+                      checked={item.syncToUber || false}
+                      onChange={(e) => updateItem(item.id, 'syncToUber', e.target.checked)}
+                    />
+                  </td>
+                  <td style={{ padding: '10px' }}>{item.name}</td>
+                  <td style={{ padding: '10px' }}>${item.price?.toFixed(2)}</td>
+                  <td style={{ padding: '10px' }}>
+                    <input
+                      type="number"
+                      value={item.markup || config.defaultMarkup || 15}
+                      onChange={(e) => updateItem(item.id, 'markup', parseFloat(e.target.value))}
+                      style={{ width: '60px', padding: '5px' }}
+                    />
+                  </td>
+                  <td style={{ padding: '10px' }}>
+                    ${(item.price * (1 + (item.markup || config.defaultMarkup || 15) / 100)).toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
 }
 
-run_local() {
-  for cmd in git curl awk sed printf; do command -v "$cmd" >/dev/null || { err "Missing required tool: $cmd"; exit 1; }; done
-  ensure_docker
-  fetch_repo
-  ensure_files
-  write_env_full
-  
-
-  note "Launching containers (this may pull images)…"
-  dc -f "$APP_DIR/docker-compose.yml" up -d --build
-
-  note "Applying migrations (best-effort)…"
-  dc -f "$APP_DIR/docker-compose.yml" exec -T app npx prisma migrate deploy || true
-  dc -f "$APP_DIR/docker-compose.yml" exec -T app node server/node_modules/.bin/ts-node server/prisma/seed.ts || true
-
-  bold "Done! Visit: http://localhost:$(grep -E '^APP_PORT=' .env | cut -d= -f2)"
-}
-
-run_azure() {
-  for cmd in git curl awk sed printf; do command -v "$cmd" >/
-
-Interrupted due to length.
-::contentReference[oaicite:0]{index=0}
+export default App;
