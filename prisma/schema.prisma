@@ -1,0 +1,158 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── NextAuth Tables ─────────────────────────────────────────────────────────
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  role          String    @default("admin")
+  createdAt     DateTime  @default(now())
+  accounts      Account[]
+  sessions      Session[]
+  settings      Settings?
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── App Settings ─────────────────────────────────────────────────────────────
+model Settings {
+  id                  String  @id @default(cuid())
+  userId              String  @unique
+  // Square
+  squareAccessToken   String?
+  squareLocationId    String?
+  squareEnvironment   String  @default("sandbox") // sandbox | production
+  // Uber Eats
+  uberClientId        String?
+  uberClientSecret    String?
+  uberStoreId         String?
+  uberAccessToken     String?
+  uberRefreshToken    String?
+  uberTokenExpiry     DateTime?
+  // Pricing
+  markupType          String  @default("percent") // percent | fixed
+  markupValue         Float   @default(30)
+  // Features
+  autoSyncStock       Boolean @default(true)
+  autoSyncHours       Boolean @default(true)
+  syncImages          Boolean @default(true)
+  // Domain
+  webhookSecret       String?
+  user                User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  updatedAt           DateTime @updatedAt
+}
+
+// ─── Menu Items ───────────────────────────────────────────────────────────────
+model MenuItem {
+  id              String   @id @default(cuid())
+  squareItemId    String   @unique
+  squareName      String
+  squareDesc      String?
+  squarePrice     Float    // in dollars
+  squareImageUrl  String?
+  squareCategoryName String?
+  squareIsAvailable  Boolean @default(true)
+  // Uber sync state
+  uberItemId      String?
+  uberSynced      Boolean  @default(false)
+  uberLastSynced  DateTime?
+  // Markup override
+  customMarkupType  String? // percent | fixed | null (use global)
+  customMarkupValue Float?
+  adjustedPrice   Float?
+  // Tracking
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  orderItems      OrderItem[]
+}
+
+// ─── Orders ──────────────────────────────────────────────────────────────────
+model Order {
+  id              String      @id @default(cuid())
+  uberOrderId     String      @unique
+  uberCustomerName String
+  squareOrderId   String?
+  squareFulfillmentId String?
+  status          String      @default("pending") // pending | accepted | completed | cancelled | failed
+  totalAmount     Float
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  items           OrderItem[]
+  rawUberPayload  String?     // JSON blob
+}
+
+model OrderItem {
+  id          String    @id @default(cuid())
+  orderId     String
+  menuItemId  String?
+  name        String
+  quantity    Int
+  unitPrice   Float
+  order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem    MenuItem? @relation(fields: [menuItemId], references: [id])
+}
+
+// ─── Webhook Log ─────────────────────────────────────────────────────────────
+model WebhookLog {
+  id          String   @id @default(cuid())
+  source      String   // uber | square
+  eventType   String
+  payload     String   // raw JSON
+  processed   Boolean  @default(false)
+  error       String?
+  receivedAt  DateTime @default(now())
+}
+
+// ─── Sync Log ────────────────────────────────────────────────────────────────
+model SyncLog {
+  id          String   @id @default(cuid())
+  type        String   // menu | stock | hours
+  status      String   // success | partial | failed
+  itemsSynced Int      @default(0)
+  message     String?
+  createdAt   DateTime @default(now())
+}
