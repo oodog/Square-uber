@@ -1,9 +1,21 @@
 // Azure Container Apps deployment - cheapest option (~$0-5/month on consumption plan)
-// Deploy with: az deployment group create --resource-group rg-mangkok --template-file azure/main.bicep --parameters @azure/params.json
+// Deploy with: bash azure/deploy.sh
 
 param location string = 'australiaeast'
 param appName string = 'mangkok-menu-sync'
-param containerImage string = 'ghcr.io/YOUR_GITHUB_USERNAME/square-uber-square:latest'
+param containerImage string
+
+@secure()
+param nextauthSecret string
+
+@secure()
+param googleClientId string = ''
+
+@secure()
+param googleClientSecret string = ''
+
+@secure()
+param githubClientSecret string = ''
 
 // Container Apps Environment (shared, free tier)
 resource environment 'Microsoft.App/managedEnvironments@2023-05-01' = {
@@ -30,9 +42,10 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         // Custom domain: app.mangkokavenue.com
       }
       secrets: [
-        { name: 'nextauth-secret', value: '' }  // Fill via az CLI or portal
-        { name: 'google-client-secret', value: '' }
-        { name: 'github-client-secret', value: '' }
+        { name: 'nextauth-secret', value: nextauthSecret }
+        { name: 'google-client-id', value: googleClientId }
+        { name: 'google-client-secret', value: googleClientSecret }
+        { name: 'github-client-secret', value: githubClientSecret }
       ]
     }
     template: {
@@ -50,6 +63,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             { name: 'NEXTAUTH_URL', value: 'https://app.mangkokavenue.com' }
             { name: 'UBER_REDIRECT_URI', value: 'https://app.mangkokavenue.com/uber-redirect/' }
             { name: 'NEXTAUTH_SECRET', secretRef: 'nextauth-secret' }
+            { name: 'GOOGLE_CLIENT_ID', secretRef: 'google-client-id' }
             { name: 'GOOGLE_CLIENT_SECRET', secretRef: 'google-client-secret' }
             { name: 'GITHUB_CLIENT_SECRET', secretRef: 'github-client-secret' }
           ]

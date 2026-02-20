@@ -111,7 +111,7 @@ export async function createSquareOrderFromUber(
     name: item.name,
     quantity: String(item.quantity),
     basePriceMoney: {
-      amount: item.unitPriceCents, // plain number in SDK v42
+      amount: BigInt(item.unitPriceCents), // SDK v42 requires BigInt
       currency: 'AUD' as const,
     },
     note: `UBER - ${customerName}`,
