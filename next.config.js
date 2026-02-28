@@ -9,9 +9,6 @@ const nextConfig = {
       { protocol: 'https', hostname: 'avatars.githubusercontent.com' },
     ],
   },
-  env: {
-    NEXTAUTH_URL: process.env.NEXTAUTH_URL,
-  },
 }
 
 module.exports = nextConfig

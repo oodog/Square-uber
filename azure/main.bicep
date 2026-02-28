@@ -5,7 +5,7 @@ param location string = 'australiaeast'
 param appName string = 'mangkok-menu-sync'
 param containerImage string
 param acrName string = 'mangkokcr'
-param nextauthUrl string = 'https://app.mangkokavenue.com'
+param nextauthUrl string = 'https://square.mangkokavenue.com'
 
 @secure()
 param nextauthSecret string
@@ -84,7 +84,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         }
       ]
       scale: {
-        minReplicas: 0   // Scale to zero when idle = free!
+        minReplicas: 1   // Always-on = no cold-start stream timeout
         maxReplicas: 1
         rules: [
           {
